@@ -2,6 +2,7 @@ package com.example.anthropicproxy.service;
 
 import com.example.anthropicproxy.model.anthropic.*;
 import com.example.anthropicproxy.model.openai.*;
+import com.example.anthropicproxy.model.openai.OpenAIStreamChunk;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -196,5 +197,68 @@ public class ConversionService {
                         .build())
                 .stopReason(choice.getFinishReason())
                 .build();
+    }
+
+    /**
+     * Convert OpenAI streaming chunk to Anthropic streaming format
+     * Returns JSON string for Anthropic response, or null for [DONE] or invalid chunks
+     */
+    public String convertStreamChunk(String openaiChunkLine, String anthropicModel, String requestId) {
+        try {
+            // Check if it's the final "[DONE]" message
+            if (openaiChunkLine.trim().equals("data: [DONE]")) {
+                // Return null to indicate completion
+                return null;
+            }
+
+            // Parse the SSE line: "data: {...}"
+            if (!openaiChunkLine.startsWith("data: ")) {
+                log.warn("Unexpected streaming line format: {}", openaiChunkLine);
+                return null;
+            }
+
+            String jsonStr = openaiChunkLine.substring(6); // Remove "data: "
+            if (jsonStr.trim().isEmpty()) {
+                return null;
+            }
+
+            // Parse OpenAI chunk
+            OpenAIStreamChunk openaiChunk = objectMapper.readValue(jsonStr, OpenAIStreamChunk.class);
+
+            // Build Anthropic streaming response
+            Map<String, Object> anthropicChunk = new HashMap<>();
+
+            // Set basic fields
+            anthropicChunk.put("type", "message");
+            anthropicChunk.put("role", "assistant");
+            anthropicChunk.put("model", anthropicModel);
+            anthropicChunk.put("id", requestId);
+
+            // Extract content from OpenAI delta
+            List<Map<String, Object>> contentList = new ArrayList<>();
+            if (openaiChunk.getChoices() != null && !openaiChunk.getChoices().isEmpty()) {
+                OpenAIStreamChunk.OpenAIStreamChoice choice = openaiChunk.getChoices().get(0);
+                if (choice.getDelta() != null && choice.getDelta().getContent() != null) {
+                    Map<String, Object> contentBlock = new HashMap<>();
+                    contentBlock.put("type", "text");
+                    contentBlock.put("text", choice.getDelta().getContent());
+                    contentList.add(contentBlock);
+                }
+
+                // Set stop reason if present
+                if (choice.getFinishReason() != null) {
+                    anthropicChunk.put("stop_reason", choice.getFinishReason());
+                }
+            }
+
+            anthropicChunk.put("content", contentList);
+
+            // Convert to JSON string (without SSE wrapper)
+            return objectMapper.writeValueAsString(anthropicChunk);
+
+        } catch (Exception e) {
+            log.error("Error converting streaming chunk", e);
+            return null;
+        }
     }
 }
